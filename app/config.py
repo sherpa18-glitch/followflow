@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     approval_timeout_hours: int = Field(default=4, ge=1, le=24)
 
     # Discovery filtering
+    discovery_min_followers: int = Field(
+        default=0,
+        description="Min follower count for target accounts",
+    )
     discovery_max_followers: int = Field(
         default=2000,
         description="Max follower count for target accounts",
