@@ -51,3 +51,48 @@ async def cooldown(min_minutes: int, max_minutes: int) -> float:
     )
     await asyncio.sleep(delay_seconds)
     return delay_minutes
+
+
+async def retry_with_backoff(
+    coro_factory,
+    max_retries: int = 3,
+    base_delay: float = 5.0,
+    max_delay: float = 120.0,
+    description: str = "operation",
+):
+    """Retry an async operation with exponential backoff.
+
+    Args:
+        coro_factory: A callable that returns a new coroutine each call.
+        max_retries: Maximum number of retry attempts.
+        base_delay: Initial delay in seconds before first retry.
+        max_delay: Maximum delay cap in seconds.
+        description: Human-readable name of the operation for logging.
+
+    Returns:
+        The result of the successful coroutine call.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last_exception = e
+            if attempt == max_retries:
+                logger.error(
+                    f"{description} failed after {max_retries + 1} attempts: {e}",
+                    extra={"action": "retry_exhausted", "detail": description},
+                )
+                raise
+
+            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 2), max_delay)
+            logger.warning(
+                f"{description} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                f"Retrying in {delay:.1f}s...",
+                extra={"action": "retry", "detail": description},
+            )
+            await asyncio.sleep(delay)

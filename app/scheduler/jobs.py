@@ -30,7 +30,7 @@ from app.instagram.follow import follow_accounts, get_follow_summary
 from app.instagram.discovery import discover_target_accounts
 from app.telegram.bot import FollowFlowBot
 from app.utils.logger import get_logger
-from app.utils.rate_limiter import cooldown
+from app.utils.rate_limiter import cooldown, retry_with_backoff
 
 logger = get_logger("scheduler")
 
@@ -97,17 +97,32 @@ async def daily_workflow(telegram_bot: FollowFlowBot) -> None:
 
     browser = None
     try:
-        # --- Launch browser and authenticate ---
+        # --- Launch browser and authenticate (with retry) ---
         browser = InstagramBrowser(headless=True)
-        await browser.launch()
 
-        authenticated = await ensure_authenticated(
-            browser,
-            settings.instagram_username,
-            settings.instagram_password,
-        )
-        if not authenticated:
-            error_msg = "Instagram authentication failed. Please check credentials."
+        async def _launch_and_auth():
+            await browser.launch()
+            ok = await ensure_authenticated(
+                browser,
+                settings.instagram_username,
+                settings.instagram_password,
+            )
+            if not ok:
+                raise RuntimeError("Authentication failed")
+            return ok
+
+        try:
+            await retry_with_backoff(
+                _launch_and_auth,
+                max_retries=2,
+                base_delay=10.0,
+                description="Instagram browser launch + auth",
+            )
+        except Exception:
+            error_msg = (
+                "Instagram authentication failed after retries. "
+                "Please check credentials or re-login manually."
+            )
             current_workflow.state = WorkflowState.ERROR
             current_workflow.error_message = error_msg
             await telegram_bot.send_error_notification(error_msg)
