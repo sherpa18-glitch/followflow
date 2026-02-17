@@ -31,16 +31,27 @@ async def is_logged_in(page: Page) -> bool:
         True if the user appears to be logged in.
     """
     try:
-        await page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(2)
+        try:
+            await page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=20000)
+        except PlaywrightTimeout:
+            logger.warning("Page load timed out on home page check")
+            return False
+        await asyncio.sleep(4)
+
+        current_url = page.url
+        logger.info(f"is_logged_in check — URL: {current_url}")
 
         # If we're redirected to login page, we're not logged in
-        if "/accounts/login" in page.url:
+        if "/accounts/login" in current_url:
             logger.info("Session expired — redirected to login page")
             return False
 
+        # If we're on the main feed, we're logged in
+        if current_url.rstrip("/") == "https://www.instagram.com":
+            logger.info("Session is valid — on main feed")
+            return True
+
         # Check for common logged-in indicators
-        # The navigation bar with profile link is present when logged in
         logged_in_indicators = [
             'svg[aria-label="Home"]',
             'a[href*="/direct/inbox/"]',
@@ -50,7 +61,7 @@ async def is_logged_in(page: Page) -> bool:
         for selector in logged_in_indicators:
             try:
                 element = await page.wait_for_selector(
-                    selector, timeout=5000, state="attached"
+                    selector, timeout=3000, state="attached"
                 )
                 if element:
                     logger.info("Session is valid — user is logged in")
@@ -91,27 +102,37 @@ async def login(
 
     try:
         # Navigate to login page
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(2)
+        try:
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
+        except PlaywrightTimeout:
+            logger.warning("Login page load timed out, proceeding anyway")
+        await asyncio.sleep(5)
 
-        # Dismiss cookie consent if present
+        # Dismiss cookie consent if present (try multiple variants)
         try:
             cookie_btn = await page.wait_for_selector(
                 'button:has-text("Allow all cookies"), '
                 'button:has-text("Allow essential and optional cookies"), '
-                'button:has-text("Accept")',
-                timeout=3000,
+                'button:has-text("Accept All"), '
+                'button:has-text("Accept"), '
+                'button:has-text("Only allow essential cookies"), '
+                'button:has-text("Decline optional cookies")',
+                timeout=5000,
             )
             if cookie_btn:
                 await cookie_btn.click()
                 logger.info("Dismissed cookie consent dialog")
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
         except PlaywrightTimeout:
             pass  # No cookie dialog
 
-        # Fill in credentials
+        # Take a screenshot for debugging if login page looks unexpected
+        current_url = page.url
+        logger.info(f"Login page URL: {current_url}")
+
+        # Fill in credentials (Instagram uses name="email" and name="pass")
         username_input = await page.wait_for_selector(
-            'input[name="username"]', timeout=10000
+            'input[name="username"], input[name="email"]', timeout=20000
         )
         await username_input.click()
         await username_input.fill("")  # Clear first
@@ -120,7 +141,7 @@ async def login(
         await random_delay(1, 2)
 
         password_input = await page.wait_for_selector(
-            'input[name="password"]', timeout=5000
+            'input[name="password"], input[name="pass"]', timeout=5000
         )
         await password_input.click()
         await password_input.fill("")
@@ -128,27 +149,29 @@ async def login(
 
         await random_delay(1, 2)
 
-        # Click login button
-        login_button = await page.wait_for_selector(
-            'button[type="submit"]', timeout=5000
-        )
-        await login_button.click()
+        # Submit login form by pressing Enter
+        await page.keyboard.press("Enter")
+        logger.info("Pressed Enter to submit login form")
 
         logger.info("Credentials submitted, waiting for response...")
-        await asyncio.sleep(4)
+        await asyncio.sleep(8)
 
-        # Check for various post-login scenarios
-        # 1. Check for wrong credentials error
-        error_message = await _check_login_error(page)
-        if error_message:
-            logger.error(
-                f"Login failed: {error_message}",
-                extra={"action": "login", "status": "failed", "detail": error_message},
-            )
-            return False
+        # Check the current URL to determine login outcome
+        current_url = page.url
+        logger.info(f"Post-login URL: {current_url}")
 
-        # 2. Check for 2FA / security code prompt
-        if await _is_2fa_required(page):
+        # If we landed on /accounts/login/ still, check for errors
+        if "/accounts/login" in current_url and "onetap" not in current_url:
+            error_message = await _check_login_error(page)
+            if error_message:
+                logger.error(
+                    f"Login failed: {error_message}",
+                    extra={"action": "login", "status": "failed", "detail": error_message},
+                )
+                return False
+
+        # Check for 2FA / security code prompt
+        if "challenge" in current_url or "two_factor" in current_url:
             logger.info("2FA required")
             if handle_2fa_callback:
                 code = await handle_2fa_callback()
@@ -157,13 +180,28 @@ async def login(
             logger.error("2FA required but no callback provided")
             return False
 
-        # 3. Check for "Save Your Login Info?" dialog
-        await _dismiss_save_login_dialog(page)
+        # If we reached onetap or the main feed, login succeeded
+        if "onetap" in current_url or current_url.rstrip("/") == "https://www.instagram.com":
+            logger.info(
+                f"Login successful for @{username} (redirected to {current_url})",
+                extra={"action": "login", "status": "success", "username": username},
+            )
 
-        # 4. Check for "Turn on Notifications?" dialog
+            # Navigate to home to dismiss any dialogs and confirm login
+            try:
+                await page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(3)
+                # Dismiss any remaining dialogs
+                await _dismiss_notifications_dialog(page)
+            except Exception as e:
+                logger.warning(f"Post-login navigation warning: {e}")
+
+            return True
+
+        # Fallback: try to verify logged-in state
+        await _dismiss_save_login_dialog(page)
         await _dismiss_notifications_dialog(page)
 
-        # 5. Verify we're actually logged in
         if await is_logged_in(page):
             logger.info(
                 f"Login successful for @{username}",

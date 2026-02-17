@@ -58,6 +58,12 @@ class Settings(BaseSettings):
         description="Account must have been active within this many days",
     )
 
+    # Browser mode
+    browser_headless: bool = Field(
+        default=False,
+        description="Run browser in headless mode (set False to avoid bot detection)",
+    )
+
     # Database
     database_url: str = Field(default="sqlite:///./followflow.db")
 

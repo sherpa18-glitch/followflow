@@ -49,8 +49,11 @@ async def get_following_list_sorted(
 
     # Navigate to profile
     profile_url = f"{INSTAGRAM_URL}{username}/"
-    await page.goto(profile_url, wait_until="domcontentloaded", timeout=15000)
-    await asyncio.sleep(2)
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+    except PlaywrightTimeout:
+        logger.warning("Profile page load timed out, proceeding anyway")
+    await asyncio.sleep(3)
 
     # Click on "Following" count to open the modal
     following_link = await _find_following_link(page)
@@ -58,8 +61,9 @@ async def get_following_list_sorted(
         logger.error("Could not find 'Following' link on profile page")
         return []
 
-    await following_link.click()
-    await asyncio.sleep(2)
+    # Use dispatch_event to bypass overlay interception
+    await following_link.dispatch_event("click")
+    await asyncio.sleep(3)
 
     # Sort by "Date followed: earliest"
     sorted_ok = await _apply_sort_earliest(page)
@@ -171,25 +175,30 @@ async def unfollow_accounts(
 
 async def _find_following_link(page: Page):
     """Find and return the 'Following' link/button on the profile page."""
+    # Try most common selectors first (Instagram uses a:has-text("following"))
     selectors = [
-        'a[href*="/following"]',
         'a:has-text("following")',
+        'li:has-text("following") a',
+        'a[href*="/following"]',
         'span:has-text("following")',
     ]
     for selector in selectors:
         try:
             element = await page.wait_for_selector(selector, timeout=5000)
             if element:
+                text = await element.inner_text()
+                logger.info(f"Found following link: {text.strip()[:40]}")
                 return element
         except PlaywrightTimeout:
             continue
 
     # Fallback: try finding by the following count pattern
     try:
-        elements = await page.query_selector_all("a[role='link']")
+        elements = await page.query_selector_all("a")
         for el in elements:
             text = await el.inner_text()
             if "following" in text.lower():
+                logger.info(f"Found following link (fallback): {text.strip()[:40]}")
                 return el
     except Exception:
         pass
@@ -279,6 +288,7 @@ async def _scroll_and_collect_accounts(
     seen_usernames = set()
     max_scroll_attempts = 50
     no_new_count = 0
+    prev_count = 0
 
     for attempt in range(max_scroll_attempts):
         if len(accounts) >= count:
@@ -296,6 +306,10 @@ async def _scroll_and_collect_accounts(
             try:
                 href = await entry.get_attribute("href")
                 if not href or href in ("/", "/explore/"):
+                    continue
+
+                # Skip non-profile links (login, signup, etc.)
+                if "/accounts/" in href or "/explore/" in href:
                     continue
 
                 # Extract username from href (e.g., "/username/" → "username")
@@ -321,16 +335,19 @@ async def _scroll_and_collect_accounts(
                 continue
 
         new_count = len(accounts)
-        if new_count == len(seen_usernames) - (len(seen_usernames) - new_count):
-            # No new accounts found in this scroll
-            no_new_count += 1
-            if no_new_count >= 5:
-                logger.info(
-                    f"No new accounts after {no_new_count} scrolls — stopping"
-                )
-                break
-        else:
-            no_new_count = 0
+        if attempt > 0:
+            if new_count == prev_count:
+                # No new accounts found in this scroll
+                no_new_count += 1
+                if no_new_count >= 5:
+                    logger.info(
+                        f"No new accounts after {no_new_count} scrolls — stopping at {new_count}"
+                    )
+                    break
+            else:
+                no_new_count = 0
+                logger.info(f"Scroll {attempt}: collected {new_count} accounts so far")
+        prev_count = new_count
 
         # Scroll down in the dialog
         dialog = await page.query_selector('div[role="dialog"]')

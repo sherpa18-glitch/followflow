@@ -68,6 +68,8 @@ class InstagramBrowser:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
             ],
         )
         self._context = await self._browser.new_context(
@@ -81,6 +83,17 @@ class InstagramBrowser:
         await self._load_cookies()
 
         self._page = await self._context.new_page()
+
+        # Anti-detection: override navigator properties
+        await self._page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            window.chrome = { runtime: {} };
+        """)
+
         logger.info("Browser launched and page ready")
 
     async def close(self) -> None:

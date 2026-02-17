@@ -98,9 +98,15 @@ async def daily_workflow(telegram_bot: FollowFlowBot) -> None:
     browser = None
     try:
         # --- Launch browser and authenticate (with retry) ---
-        browser = InstagramBrowser(headless=True)
-
         async def _launch_and_auth():
+            nonlocal browser
+            # Close previous browser if retrying
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            browser = InstagramBrowser(headless=settings.browser_headless)
             await browser.launch()
             ok = await ensure_authenticated(
                 browser,
