@@ -149,6 +149,7 @@ async def daily_workflow(telegram_bot: FollowFlowBot) -> None:
             page,
             settings.instagram_username,
             count=settings.unfollow_batch_size,
+            browser=browser,
         )
 
         if not accounts_to_unfollow:

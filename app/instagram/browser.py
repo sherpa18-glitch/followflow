@@ -14,13 +14,21 @@ logger = get_logger("browser")
 # Persist cookies here so we can skip re-login on subsequent runs
 COOKIES_PATH = Path("session_cookies.json")
 
-# Realistic mobile-like viewport and user agent
+# Desktop user agent and viewport (used for login, follow, etc.)
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+
+# Mobile user agent and viewport (used for Following list sort)
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.0 Mobile/15E148 Safari/604.1"
+)
+MOBILE_VIEWPORT = {"width": 390, "height": 844}
 
 
 class InstagramBrowser:
@@ -51,6 +59,8 @@ class InstagramBrowser:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._mobile_context: Optional[BrowserContext] = None
+        self._mobile_page: Optional[Page] = None
 
     async def __aenter__(self):
         await self.launch()
@@ -98,6 +108,7 @@ class InstagramBrowser:
 
     async def close(self) -> None:
         """Save cookies and shut down the browser."""
+        await self.close_mobile_page()
         if self._context:
             await self._save_cookies()
         if self._browser:
@@ -111,6 +122,65 @@ class InstagramBrowser:
         if self._page is None:
             await self.launch()
         return self._page
+
+    async def get_mobile_page(self) -> Page:
+        """Create and return a mobile-emulated page sharing the same session.
+
+        Instagram's "Date followed: earliest" sort option is only
+        available on the mobile web UI.  This method creates a second
+        browser context with a mobile user-agent and viewport, copies
+        the current session cookies into it, and returns a mobile page.
+
+        Call :meth:`close_mobile_page` when done to free resources.
+        """
+        if self._mobile_page is not None:
+            return self._mobile_page
+
+        if self._browser is None:
+            await self.launch()
+
+        logger.info("Creating mobile-emulated browser context for sort support")
+
+        self._mobile_context = await self._browser.new_context(
+            user_agent=MOBILE_USER_AGENT,
+            viewport=MOBILE_VIEWPORT,
+            device_scale_factor=3,
+            is_mobile=True,
+            has_touch=True,
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+
+        # Share cookies from the desktop session so we stay logged in
+        if self._context:
+            cookies = await self._context.cookies()
+            if cookies:
+                await self._mobile_context.add_cookies(cookies)
+                logger.info(
+                    f"Copied {len(cookies)} cookies to mobile context"
+                )
+
+        self._mobile_page = await self._mobile_context.new_page()
+
+        # Same anti-detection overrides
+        await self._mobile_page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        """)
+
+        logger.info("Mobile page ready")
+        return self._mobile_page
+
+    async def close_mobile_page(self) -> None:
+        """Close the mobile context and page if open."""
+        if self._mobile_context:
+            try:
+                await self._mobile_context.close()
+            except Exception:
+                pass
+            self._mobile_context = None
+            self._mobile_page = None
+            logger.info("Mobile browser context closed")
 
     async def _save_cookies(self) -> None:
         """Persist the current browser cookies to disk."""

@@ -61,7 +61,7 @@ class FollowFlowBot:
         text = (
             "🔔 *FollowFlow — Daily Unfollow Request*\n\n"
             f"Ready to unfollow *{total} accounts* "
-            f"(oldest followed first)\\.\n\n"
+            f"\\(oldest followed first\\)\\.\n\n"
             f"*Preview:*\n{_escape_md(preview_lines)}\n"
         )
         if remaining > 0:
