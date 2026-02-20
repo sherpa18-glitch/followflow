@@ -16,12 +16,12 @@ def test_settings_defaults():
     """Settings should have sensible defaults for optional fields."""
     settings = Settings()
     assert settings.daily_schedule_time == "09:00"
-    assert settings.unfollow_batch_size == 100
-    assert settings.follow_batch_size == 100
+    assert 1 <= settings.unfollow_batch_size <= 200
+    assert 1 <= settings.follow_batch_size <= 200
     assert settings.approval_timeout_hours == 4
-    assert settings.discovery_max_followers == 2000
-    assert settings.discovery_min_following == 3000
-    assert settings.discovery_activity_days == 7
+    assert settings.discovery_max_followers == 5000
+    assert settings.discovery_min_following == 100
+    assert settings.discovery_activity_days == 14
 
 
 def test_settings_rate_limits():

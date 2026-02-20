@@ -133,8 +133,8 @@ class FollowFlowBot:
             f"Ready to follow *{total} active accounts* "
             f"in the pet/dog niche\\.\n\n"
             "*Criteria applied:*\n"
-            "  • Followers < 2,000 \\| Following > 3,000\n"
-            "  • Active in last 7 days\n"
+            "  • Followers \\< 5,000 \\| Following \\> 100\n"
+            "  • Active in last 14 days\n"
             "  • Regions: NA, South Korea, Japan, Europe, Australia\n"
             "  • Not on blocklist\n\n"
             f"*Preview:*\n{_escape_md(preview_text)}\n"
@@ -201,7 +201,7 @@ class FollowFlowBot:
         if old_following is not None and new_following is not None:
             text += f"\nYour following count: {old_following} → {new_following}\n"
 
-        text += "\n_Next step: Follow action will be requested shortly\\._"
+        text += "\n_Unfollow phase complete\\._"
 
         message = await self.bot.send_message(
             chat_id=self.chat_id,
@@ -250,7 +250,7 @@ class FollowFlowBot:
         if old_following is not None and new_following is not None:
             text += f"\nYour following count: {old_following} → {new_following}\n"
 
-        text += "\n📊 _Daily cycle complete\\. Next run: tomorrow\\._"
+        text += "\n📊 _Follow phase complete\\._"
 
         message = await self.bot.send_message(
             chat_id=self.chat_id,
@@ -364,7 +364,7 @@ def _escape_md(text: str) -> str:
     MarkdownV2 requires escaping these characters:
     _ * [ ] ( ) ~ ` > # + - = | { } . !
     """
-    special_chars = r"_*[]()~`>#+-=|{}.!"
+    special_chars = r"_*[]()~`<>#+-=|{}.!"
     result = []
     for char in text:
         if char in special_chars:

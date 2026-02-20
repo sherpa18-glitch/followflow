@@ -35,7 +35,7 @@ def test_create_action_log(db_session):
 
 
 def test_create_follow_action_log(db_session):
-    """ActionLog should work for FOLLOW actions with region UNKNOWN."""
+    """ActionLog should work for FOLLOW actions with region and category."""
     log = ActionLog(
         action_type="FOLLOW",
         target_username="puppy_fan_kr",
@@ -43,6 +43,7 @@ def test_create_follow_action_log(db_session):
         target_following_count=4200,
         target_region="UNKNOWN",
         region_confidence="UNKNOWN",
+        target_category="dogs",
         status="SUCCESS",
         daily_batch_id="batch-002",
     )
@@ -52,6 +53,7 @@ def test_create_follow_action_log(db_session):
     result = db_session.query(ActionLog).first()
     assert result.action_type == "FOLLOW"
     assert result.region_confidence == "UNKNOWN"
+    assert result.target_category == "dogs"
 
 
 def test_create_approval_log(db_session):

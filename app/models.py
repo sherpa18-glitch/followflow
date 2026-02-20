@@ -35,6 +35,11 @@ class ActionLog(Base):
         Enum("HIGH", "MEDIUM", "UNKNOWN", name="region_confidence_enum"),
         nullable=True,
     )
+    target_category = Column(
+        String(50),
+        nullable=True,
+        comment="Detected account category: pets, dogs, photography, etc.",
+    )
     status = Column(
         Enum("SUCCESS", "FAILED", "RATE_LIMITED", name="action_status_enum"),
         nullable=False,

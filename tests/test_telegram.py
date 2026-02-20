@@ -175,8 +175,8 @@ class TestSendFollowApproval:
         call_kwargs = bot.bot.send_message.call_args.kwargs
         text = call_kwargs["text"]
         assert "3 active accounts" in text
-        assert "2,000" in text
-        assert "3,000" in text
+        assert "5,000" in text
+        assert "100" in text
 
     @pytest.mark.asyncio
     async def test_message_has_inline_keyboard(self, bot, sample_follow_accounts):

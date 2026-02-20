@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, patch
 
 from app.instagram.discovery import (
     detect_region,
+    detect_category,
     _parse_count,
     filter_candidates,
     discover_target_accounts,
     NICHE_HASHTAGS,
     REGION_KEYWORDS,
+    CATEGORY_KEYWORDS,
 )
 
 
@@ -116,6 +118,49 @@ class TestDetectRegion:
         region, confidence = detect_region(details)
         assert region == "UNKNOWN"
         assert confidence == "UNKNOWN"
+
+
+# --- Tests: Category Detection ---
+
+class TestDetectCategory:
+    def test_dog_bio(self):
+        details = {"bio": "GSD puppy mom 🐶", "username": "gsd_lover"}
+        assert detect_category(details) == "dogs"
+
+    def test_cat_bio(self):
+        details = {"bio": "Cat lady with 3 kitties", "username": "catlady"}
+        assert detect_category(details) == "cats"
+
+    def test_photography_bio(self):
+        details = {"bio": "Landscape photographer | Canon EOS R5", "username": "photoart"}
+        assert detect_category(details) == "photography"
+
+    def test_pets_generic(self):
+        details = {"bio": "Pet parent of two fur babies", "username": "petmom"}
+        assert detect_category(details) == "pets"
+
+    def test_empty_bio_returns_other(self):
+        details = {"bio": "", "username": "noinfo"}
+        assert detect_category(details) == "other"
+
+    def test_no_match_returns_other(self):
+        details = {"bio": "hello world", "username": "genericuser"}
+        assert detect_category(details) == "other"
+
+    def test_korean_dog(self):
+        details = {"bio": "강아지와 함께하는 일상", "username": "kr_dog"}
+        assert detect_category(details) == "dogs"
+
+    def test_username_detection(self):
+        details = {"bio": "", "username": "puppy_gsd_daily"}
+        assert detect_category(details) == "dogs"
+
+    def test_category_keywords_exist(self):
+        assert "dogs" in CATEGORY_KEYWORDS
+        assert "cats" in CATEGORY_KEYWORDS
+        assert "pets" in CATEGORY_KEYWORDS
+        assert "photography" in CATEGORY_KEYWORDS
+        assert "entertainment" in CATEGORY_KEYWORDS
 
 
 # --- Tests: Niche Hashtags ---

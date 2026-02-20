@@ -169,7 +169,7 @@ async def _follow_single_account(page: Page, username: str) -> Dict:
     try:
         profile_url = f"{INSTAGRAM_URL}{username}/"
         await page.goto(profile_url, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         # Check if profile exists
         not_found_selectors = [
@@ -178,7 +178,7 @@ async def _follow_single_account(page: Page, username: str) -> Dict:
         ]
         for selector in not_found_selectors:
             try:
-                el = await page.wait_for_selector(selector, timeout=1500)
+                el = await page.wait_for_selector(selector, timeout=1000)
                 if el:
                     return {
                         "username": username,
@@ -215,7 +215,7 @@ async def _follow_single_account(page: Page, username: str) -> Dict:
             }
 
         await follow_button.click()
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         # Check for action blocked
         if await _is_action_blocked(page):
@@ -266,7 +266,7 @@ async def _find_follow_button(page: Page):
     ]
     for selector in selectors:
         try:
-            btn = await page.wait_for_selector(selector, timeout=5000)
+            btn = await page.wait_for_selector(selector, timeout=3000)
             if btn:
                 text = await btn.inner_text()
                 # Make sure it says "Follow" and not "Following" or "Unfollow"
@@ -285,7 +285,7 @@ async def _is_already_following(page: Page) -> bool:
     ]
     for selector in selectors:
         try:
-            btn = await page.wait_for_selector(selector, timeout=2000)
+            btn = await page.wait_for_selector(selector, timeout=1500)
             if btn:
                 text = await btn.inner_text()
                 if text.strip().lower() in ("following", "requested"):
@@ -306,7 +306,7 @@ async def _determine_follow_type(page: Page) -> str:
         # Check for "Requested" (private account)
         requested = await page.wait_for_selector(
             'button:has-text("Requested")',
-            timeout=3000,
+            timeout=1500,
         )
         if requested:
             return "private"
@@ -317,7 +317,7 @@ async def _determine_follow_type(page: Page) -> str:
         # Check for "Following" (public account)
         following = await page.wait_for_selector(
             'button:has-text("Following")',
-            timeout=3000,
+            timeout=1500,
         )
         if following:
             return "public"
@@ -338,7 +338,7 @@ async def _is_action_blocked(page: Page) -> bool:
     ]
     for selector in block_indicators:
         try:
-            element = await page.wait_for_selector(selector, timeout=2000)
+            element = await page.wait_for_selector(selector, timeout=1000)
             if element:
                 logger.warning(
                     "Instagram action blocked detected!",

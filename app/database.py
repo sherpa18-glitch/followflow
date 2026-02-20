@@ -52,7 +52,24 @@ def init_db():
     """Create all tables defined in models.
 
     Call this on startup if not using Alembic migrations.
+    Also handles lightweight schema migrations for SQLite.
     """
     from app import models  # noqa: F401 — ensure models are imported
 
-    Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+
+    # Lightweight migration: add target_category column if missing
+    _migrate_add_column(engine, "action_logs", "target_category", "VARCHAR(50)")
+
+
+def _migrate_add_column(engine, table: str, column: str, col_type: str):
+    """Add a column to an existing table if it doesn't exist (SQLite)."""
+    from sqlalchemy import text, inspect
+
+    inspector = inspect(engine)
+    columns = [c["name"] for c in inspector.get_columns(table)]
+    if column not in columns:
+        with engine.connect() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            conn.commit()

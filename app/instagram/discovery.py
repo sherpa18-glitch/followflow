@@ -1,11 +1,12 @@
 """Discovery engine for finding target accounts in the pet/dog niche.
 
-Crawls hashtags, mines engagements from top posts, fetches account
-details, detects regions, and applies the full filter pipeline:
+Uses Instagram's private API to crawl hashtags, mine engagements from
+post likers, fetch account details, detect regions, and apply the
+full filter pipeline:
 
-  - Followers < 2,000
-  - Following > 3,000
-  - Active in last 7 days
+  - Followers < 5,000  (small accounts — more likely to follow back)
+  - Following > 100    (active users, not ghost accounts)
+  - Active in last 14 days
   - Pet/dog niche
   - Regions: NA, KR, JP, EU, AU (UNKNOWN included for broader reach)
   - Not already followed
@@ -15,11 +16,14 @@ Prioritizes confirmed-region accounts, fills remaining with unknown.
 """
 
 import asyncio
+import json
 import random
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple
 
+import httpx
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
 from app.utils.logger import get_logger
@@ -28,6 +32,34 @@ from app.utils.rate_limiter import random_delay
 logger = get_logger("discovery")
 
 INSTAGRAM_URL = "https://www.instagram.com/"
+INSTAGRAM_API = "https://i.instagram.com/api/v1"
+
+# Android user-agent for the private API
+_API_USER_AGENT = (
+    "Instagram 275.0.0.27.98 Android "
+    "(33/13; 420dpi; 1080x2400; samsung; SM-G991B; "
+    "o1s; exynos2100; en_US; 458229258)"
+)
+_API_APP_ID = "936619743392459"
+COOKIES_PATH = Path("session_cookies.json")
+
+
+def _get_api_session() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Load session cookies and return (headers, cookies) for API calls."""
+    with open(COOKIES_PATH) as f:
+        cookies_list = json.load(f)
+    cookie_dict = {c["name"]: c["value"] for c in cookies_list}
+    headers = {
+        "User-Agent": _API_USER_AGENT,
+        "X-CSRFToken": cookie_dict.get("csrftoken", ""),
+        "X-IG-App-ID": _API_APP_ID,
+    }
+    cookies = {
+        "sessionid": cookie_dict["sessionid"],
+        "ds_user_id": cookie_dict["ds_user_id"],
+        "csrftoken": cookie_dict.get("csrftoken", ""),
+    }
+    return headers, cookies
 
 # Hashtags to crawl for the pet/dog niche
 NICHE_HASHTAGS = [
@@ -219,10 +251,13 @@ async def crawl_hashtags(
     tags: Optional[List[str]] = None,
     limit_per_tag: int = 15,
 ) -> Set[str]:
-    """Search pet/dog hashtags and collect usernames from recent posts.
+    """Crawl hashtags via Instagram API and collect post-author usernames.
+
+    Uses ``POST /api/v1/tags/{tag}/sections/`` to fetch recent posts
+    under each hashtag, extracting the post authors.
 
     Args:
-        page: Authenticated Playwright page.
+        page: Authenticated Playwright page (unused — kept for interface compat).
         tags: Hashtags to crawl (defaults to NICHE_HASHTAGS).
         limit_per_tag: Max accounts to collect per hashtag.
 
@@ -230,61 +265,53 @@ async def crawl_hashtags(
         Set of discovered usernames.
     """
     tags = tags or NICHE_HASHTAGS
-    usernames = set()
+    usernames: Set[str] = set()
 
-    # Shuffle tags so we don't always crawl in the same order
     shuffled_tags = list(tags)
     random.shuffle(shuffled_tags)
-
-    # Only crawl a subset each run to manage time
     tags_to_crawl = shuffled_tags[:8]
 
-    for tag in tags_to_crawl:
-        try:
-            tag_url = f"{INSTAGRAM_URL}explore/tags/{tag}/"
-            await page.goto(tag_url, wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
+    try:
+        api_headers, api_cookies = _get_api_session()
+    except Exception as e:
+        logger.warning(f"Cannot load API session for hashtag crawl: {e}")
+        return usernames
 
-            # Collect post links from the tag page
-            post_links = await page.query_selector_all(
-                'a[href*="/p/"], a[href*="/reel/"]'
-            )
+    async with httpx.AsyncClient(timeout=15) as client:
+        for tag in tags_to_crawl:
+            try:
+                url = f"{INSTAGRAM_API}/tags/{tag}/sections/"
+                resp = await client.post(
+                    url,
+                    headers=api_headers,
+                    cookies=api_cookies,
+                    data={"tab": "recent", "count": limit_per_tag},
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            collected = 0
-            for link in post_links[:limit_per_tag]:
-                try:
-                    href = await link.get_attribute("href")
-                    if not href:
-                        continue
+                collected = 0
+                for section in data.get("sections", []):
+                    medias = section.get("layout_content", {}).get("medias", [])
+                    for m in medias:
+                        media = m.get("media", {})
+                        user = media.get("user", {})
+                        uname = user.get("username")
+                        if uname and collected < limit_per_tag:
+                            usernames.add(uname)
+                            collected += 1
 
-                    # Navigate to the post to get the author
-                    await page.goto(
-                        f"{INSTAGRAM_URL.rstrip('/')}{href}",
-                        wait_until="domcontentloaded",
-                        timeout=10000,
-                    )
-                    await asyncio.sleep(1.5)
+                logger.info(
+                    f"#{tag}: collected {collected} usernames",
+                    extra={"action": "hashtag_crawl", "detail": f"#{tag}:{collected}"},
+                )
 
-                    # Extract the post author
-                    author = await _extract_post_author(page)
-                    if author:
-                        usernames.add(author)
-                        collected += 1
+                # Small delay between tag requests
+                await asyncio.sleep(1)
 
-                    await random_delay(2, 4)
-
-                except Exception as e:
-                    logger.debug(f"Error processing post in #{tag}: {e}")
-                    continue
-
-            logger.info(
-                f"#{tag}: collected {collected} usernames",
-                extra={"action": "hashtag_crawl", "detail": f"#{tag}:{collected}"},
-            )
-
-        except Exception as e:
-            logger.warning(f"Error crawling #{tag}: {e}")
-            continue
+            except Exception as e:
+                logger.warning(f"Error crawling #{tag}: {e}")
+                continue
 
     return usernames
 
@@ -293,63 +320,81 @@ async def mine_engagements(
     page: Page,
     limit: int = 50,
 ) -> Set[str]:
-    """Mine usernames from "Liked by" lists on top niche posts.
+    """Mine usernames from post likers via Instagram API.
 
-    Navigates to a few niche hashtag pages, opens top posts,
-    and scrapes the "liked by" user list.
+    Fetches recent posts from a few hashtags via the sections API,
+    then calls ``GET /api/v1/media/{id}/likers/`` to collect users
+    who liked those posts.
 
     Args:
-        page: Authenticated Playwright page.
+        page: Authenticated Playwright page (unused — kept for compat).
         limit: Maximum usernames to collect.
 
     Returns:
         Set of discovered usernames.
     """
-    usernames = set()
+    usernames: Set[str] = set()
 
-    # Use a couple of popular tags for engagement mining
     mining_tags = random.sample(NICHE_HASHTAGS[:10], min(3, len(NICHE_HASHTAGS)))
 
-    for tag in mining_tags:
-        try:
-            tag_url = f"{INSTAGRAM_URL}explore/tags/{tag}/"
-            await page.goto(tag_url, wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
+    try:
+        api_headers, api_cookies = _get_api_session()
+    except Exception as e:
+        logger.warning(f"Cannot load API session for engagement mining: {e}")
+        return usernames
 
-            # Click on first few top posts
-            post_links = await page.query_selector_all(
-                'a[href*="/p/"], a[href*="/reel/"]'
-            )
+    async with httpx.AsyncClient(timeout=15) as client:
+        for tag in mining_tags:
+            if len(usernames) >= limit:
+                break
+            try:
+                # Fetch posts under this hashtag
+                url = f"{INSTAGRAM_API}/tags/{tag}/sections/"
+                resp = await client.post(
+                    url,
+                    headers=api_headers,
+                    cookies=api_cookies,
+                    data={"tab": "top", "count": 10},
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            for link in post_links[:3]:
-                if len(usernames) >= limit:
-                    break
+                # Collect media IDs from the response
+                media_ids = []
+                for section in data.get("sections", []):
+                    medias = section.get("layout_content", {}).get("medias", [])
+                    for m in medias:
+                        mid = m.get("media", {}).get("pk")
+                        if mid:
+                            media_ids.append(str(mid))
 
-                try:
-                    href = await link.get_attribute("href")
-                    if not href:
+                # For top 5 posts, get likers
+                for mid in media_ids[:5]:
+                    if len(usernames) >= limit:
+                        break
+                    try:
+                        likers_url = f"{INSTAGRAM_API}/media/{mid}/likers/"
+                        resp2 = await client.get(
+                            likers_url,
+                            headers=api_headers,
+                            cookies=api_cookies,
+                        )
+                        resp2.raise_for_status()
+                        likers = resp2.json().get("users", [])
+                        for liker in likers[:20]:
+                            uname = liker.get("username")
+                            if uname:
+                                usernames.add(uname)
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        logger.debug(f"Error fetching likers for media {mid}: {e}")
                         continue
 
-                    await page.goto(
-                        f"{INSTAGRAM_URL.rstrip('/')}{href}",
-                        wait_until="domcontentloaded",
-                        timeout=10000,
-                    )
-                    await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
-                    # Try to open "Liked by" list
-                    liked_users = await _get_liked_by_users(page, max_users=20)
-                    usernames.update(liked_users)
-
-                    await random_delay(2, 4)
-
-                except Exception as e:
-                    logger.debug(f"Error mining engagement: {e}")
-                    continue
-
-        except Exception as e:
-            logger.warning(f"Error mining #{tag}: {e}")
-            continue
+            except Exception as e:
+                logger.warning(f"Error mining #{tag}: {e}")
+                continue
 
     return usernames
 
@@ -357,53 +402,149 @@ async def mine_engagements(
 async def get_account_details(page: Page, username: str) -> Optional[Dict]:
     """Fetch follower/following counts, bio, and recent post info.
 
+    Uses Instagram's ``web_profile_info`` API endpoint as primary
+    method, falling back to browser scraping if it fails.
+
     Args:
-        page: Authenticated Playwright page.
+        page: Authenticated Playwright page (used as fallback).
         username: The account to look up.
 
     Returns:
         Dict with account details, or None if profile can't be loaded.
     """
+    # ── Primary: API-based fetch ──
     try:
-        profile_url = f"{INSTAGRAM_URL}{username}/"
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=10000)
-        await asyncio.sleep(1.5)
-
-        # Check if profile exists / is accessible
-        if await _is_profile_not_found(page):
-            return None
-
-        # Extract follower/following counts
-        counts = await _extract_profile_counts(page)
-        if not counts:
-            return None
-
-        # Extract bio text
-        bio = await _extract_bio(page)
-
-        # Check recent post dates
-        last_post_date = await _get_last_post_date(page)
-
-        details = {
-            "username": username,
-            "follower_count": counts.get("followers", 0),
-            "following_count": counts.get("following", 0),
-            "post_count": counts.get("posts", 0),
-            "bio": bio or "",
-            "last_post_date": last_post_date,
-            "is_private": await _is_private_account(page),
-        }
-
-        # Detect region
-        region, confidence = detect_region(details)
-        details["region"] = region
-        details["region_confidence"] = confidence
-
-        return details
-
+        details = await _get_account_details_via_api(username)
+        if details:
+            return details
     except Exception as e:
-        logger.debug(f"Error fetching details for @{username}: {e}")
+        logger.debug(f"API details failed for @{username}: {e}")
+
+    # ── Fallback: browser-based scraping ──
+    try:
+        return await _get_account_details_via_browser(page, username)
+    except Exception as e:
+        logger.debug(f"Browser details failed for @{username}: {e}")
         return None
+
+
+async def _get_account_details_via_api(username: str) -> Optional[Dict]:
+    """Fetch account details via Instagram private API.
+
+    Uses ``users/search`` to resolve the username → user ID, then
+    ``users/{id}/info/`` for full profile details. These endpoints
+    are more resilient to rate-limiting than ``web_profile_info``.
+    """
+    try:
+        api_headers, api_cookies = _get_api_session()
+    except Exception:
+        return None
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Step 1: Search for username to get user PK (ID)
+        search_resp = await client.get(
+            f"{INSTAGRAM_API}/users/search/",
+            headers=api_headers,
+            cookies=api_cookies,
+            params={"q": username, "count": 1},
+        )
+        if search_resp.status_code == 429:
+            logger.warning(
+                f"Search API rate-limited for @{username}",
+                extra={"action": "api_rate_limit"},
+            )
+            return None
+        search_resp.raise_for_status()
+
+        users = search_resp.json().get("users", [])
+        if not users:
+            return None
+
+        # Verify exact username match (search can return fuzzy results)
+        matched_user = None
+        for u in users:
+            if u.get("username", "").lower() == username.lower():
+                matched_user = u
+                break
+        if not matched_user:
+            return None
+
+        user_pk = matched_user["pk"]
+
+        # Step 2: Fetch full user info by ID
+        info_resp = await client.get(
+            f"{INSTAGRAM_API}/users/{user_pk}/info/",
+            headers=api_headers,
+            cookies=api_cookies,
+        )
+        if info_resp.status_code == 429:
+            logger.warning(
+                f"UserInfo API rate-limited for @{username}",
+                extra={"action": "api_rate_limit"},
+            )
+            return None
+        info_resp.raise_for_status()
+
+        user = info_resp.json().get("user")
+        if not user:
+            return None
+
+    # Extract recent post timestamp if available
+    last_post_date = None
+    latest_reel = user.get("latest_reel_media")
+    if latest_reel:
+        last_post_date = datetime.utcfromtimestamp(latest_reel).isoformat()
+
+    details = {
+        "username": username,
+        "follower_count": user.get("follower_count", 0),
+        "following_count": user.get("following_count", 0),
+        "post_count": user.get("media_count", 0),
+        "bio": user.get("biography", ""),
+        "last_post_date": last_post_date,
+        "is_private": user.get("is_private", False),
+    }
+
+    region, confidence = detect_region(details)
+    details["region"] = region
+    details["region_confidence"] = confidence
+    details["category"] = detect_category(details)
+
+    return details
+
+
+async def _get_account_details_via_browser(page: Page, username: str) -> Optional[Dict]:
+    """Fallback: fetch account details by navigating to the profile."""
+    profile_url = f"{INSTAGRAM_URL}{username}/"
+    await page.goto(profile_url, wait_until="domcontentloaded", timeout=10000)
+    await asyncio.sleep(1.5)
+
+    if await _is_profile_not_found(page):
+        return None
+
+    counts = await _extract_profile_counts(page)
+    if not counts:
+        return None
+
+    bio = await _extract_bio(page)
+    last_post_date = await _get_last_post_date(page)
+
+    details = {
+        "username": username,
+        "follower_count": counts.get("followers", 0),
+        "following_count": counts.get("following", 0),
+        "post_count": counts.get("posts", 0),
+        "bio": bio or "",
+        "last_post_date": last_post_date,
+        "is_private": await _is_private_account(page),
+    }
+
+    region, confidence = detect_region(details)
+    details["region"] = region
+    details["region_confidence"] = confidence
+    details["category"] = detect_category(details)
+
+    return details
 
 
 def detect_region(account_details: Dict) -> Tuple[str, str]:
@@ -465,6 +606,90 @@ def detect_region(account_details: Dict) -> Tuple[str, str]:
             return ("NA", "MEDIUM")  # Most likely NA for English pet content
 
     return ("UNKNOWN", "UNKNOWN")
+
+
+# Category detection keywords — matched against bio text
+CATEGORY_KEYWORDS = {
+    "dogs": [
+        "dog", "puppy", "pup", "canine", "doggo", "pupper", "doggy",
+        "gsd", "german shepherd", "golden retriever", "labrador", "bulldog",
+        "poodle", "husky", "corgi", "beagle", "dachshund", "rottweiler",
+        "border collie", "shiba", "frenchie", "pitbull",
+        "犬", "わんこ", "강아지", "멍멍이", "perro", "hund", "chien", "cane",
+    ],
+    "cats": [
+        "cat", "kitten", "kitty", "feline", "meow", "neko",
+        "猫", "ねこ", "고양이", "gato", "katze", "chat",
+    ],
+    "pets": [
+        "pet", "animal", "fur baby", "furbaby", "fur kid",
+        "pet parent", "pet lover", "animal lover",
+        "ペット", "반려동물",
+    ],
+    "photography": [
+        "photographer", "photography", "photo", "portrait",
+        "landscape", "street photo", "camera", "canon", "nikon", "sony",
+        "写真", "사진",
+    ],
+    "travel": [
+        "travel", "wanderlust", "explorer", "adventure", "backpack",
+        "nomad", "旅", "여행",
+    ],
+    "fitness": [
+        "fitness", "gym", "workout", "crossfit", "bodybuilding",
+        "yoga", "pilates", "health", "athlete",
+    ],
+    "food": [
+        "food", "foodie", "chef", "cook", "baking", "recipe",
+        "料理", "음식",
+    ],
+    "lifestyle": [
+        "lifestyle", "blogger", "influencer", "content creator",
+        "daily life", "vlog",
+    ],
+    "art": [
+        "artist", "art", "illustration", "drawing", "painting",
+        "design", "graphic", "creative",
+    ],
+    "entertainment": [
+        "entertainment", "comedy", "funny", "meme", "humor",
+        "music", "singer", "musician", "dancer",
+    ],
+}
+
+
+def detect_category(account_details: Dict) -> str:
+    """Detect the likely category/niche of an account from its bio.
+
+    Args:
+        account_details: Dict with 'bio' key.
+
+    Returns:
+        Category string like 'dogs', 'pets', 'photography', etc.
+        Returns 'other' if no category is detected.
+    """
+    bio = account_details.get("bio", "").lower()
+    username = account_details.get("username", "").lower()
+    combined = f"{bio} {username}"
+
+    if not combined.strip():
+        return "other"
+
+    # Score each category by keyword matches
+    scores: Dict[str, int] = {}
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        score = 0
+        for kw in keywords:
+            if kw in combined:
+                score += 1
+        if score > 0:
+            scores[category] = score
+
+    if not scores:
+        return "other"
+
+    # Return the category with the highest score
+    return max(scores, key=scores.get)
 
 
 async def filter_candidates(
@@ -551,8 +776,8 @@ async def filter_candidates(
                 extra={"action": "filter_progress"},
             )
 
-        # Small delay between profile checks
-        await random_delay(2, 4)
+        # Delay between profile checks — polite to API, avoids 429s
+        await random_delay(1.0, 2.0)
 
     logger.info(
         f"Filter complete: checked {checked}, qualified {len(qualified)}",

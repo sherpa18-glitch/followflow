@@ -46,15 +46,15 @@ class Settings(BaseSettings):
         description="Min follower count for target accounts",
     )
     discovery_max_followers: int = Field(
-        default=2000,
+        default=5000,
         description="Max follower count for target accounts",
     )
     discovery_min_following: int = Field(
-        default=3000,
-        description="Min following count for target accounts",
+        default=100,
+        description="Min following count for target accounts (active users)",
     )
     discovery_activity_days: int = Field(
-        default=7,
+        default=14,
         description="Account must have been active within this many days",
     )
 
